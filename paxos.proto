@@ -25,6 +25,7 @@ service Chatter {
 
 message ChatRequest {
   string line = 1;
+  int32 seq_num = 2;
 }
 
 message ChatReply {
