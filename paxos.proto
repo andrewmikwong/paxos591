@@ -20,14 +20,14 @@ package paxos;
 
 // Interface exported by the server.
 service Chatter {
-  rpc SendChatLine (ChatRequest) returns(ChatReply) {}
+  rpc SendChatMessage (ChatRequest) returns(ChatReply) {}
 }
 
 message ChatRequest {
-  string line = 1;
+  string mesg = 1;
   int32 seq_num = 2;
 }
 
 message ChatReply {
-  string line = 1;
+  string mesg = 1;
 }

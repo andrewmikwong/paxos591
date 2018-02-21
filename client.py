@@ -16,12 +16,12 @@ def main():
 	f=configs['f']
 	s=''
 
-	channel=grpc.insecure_channel('0.0.0.0:8000')
+	channel=grpc.insecure_channel('localhost:8000')
 	stub=paxos_pb2_grpc.ChatterStub(channel)
 	while(s!='quit'):
 		s=raw_input()
-		response=stub.SendChatLine(paxos_pb2.ChatRequest(line=s))
-		print response.line	
+		response=stub.SendChatMessage(paxos_pb2.ChatRequest(mesg=s))
+		print response.mesg	
 		
 
 if __name__=='__main__':
