@@ -22,6 +22,9 @@ message PrepareSend{
 message PromiseReply{
   int32 highest_proposal = 1;
   int32 highest_value = 2;
+  //has the accepter already accepted anything in this slot?
+  int32 accepted=3;
+  int32 ignored=4;
 }
 
 message ChatRequest {

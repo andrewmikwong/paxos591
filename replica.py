@@ -15,13 +15,13 @@ uid=-1
 f=-1
 n=-1
 
-proposal_num=0
+view=0
 p=-1
-highest_val=-1
+accepted_val=None
+accepted_p=None
 
 channels=[]
 stubs=[]
-view=0
 
 _ONE_DAY_IN_SECONDS=60*60*24
 
@@ -33,36 +33,82 @@ def print_state():
 class Chatter(paxos_pb2_grpc.ChatterServicer):
 	def SendChatMessage(self, request, context):
 		if(view%n==uid):
-			broadcast_prepare()
+			val= broadcast_prepare(request.mesg)
+			if val==None:
+				print "faild"
+				return paxos_pb2.ChatReply(mesg='IGNORED')
+			print val
+			broadcast_accept(val)
 			return paxos_pb2.ChatReply(mesg='ack: %s'%request.mesg)
 		else:
 			return paxos_pb2.ChatReply(mesg='IGNORED')
 
 class Paxos(paxos_pb2_grpc.PaxosServicer):
 	def Prepare(self, request, context):
-		if request.proposal<proposal_num:
-			return
+		global view
+		if request.proposal<view:
+			return paxos_pb2.PromiseReply(ignored=1)
 		else:
-			highest_seen_p=proposal_num
-			if request.proposal>proposal_num:
-				proposal_num=request.proposal
-			return paxos_pb2.PromiseReply(highest_proposal=highest_seen_p,highest_value=highest_val)
+			#NEED A LOCK here!!!!!
+			#all view writes need locks!!
+			view=max(request.proposal,view)
+			if accepted_val==None:
+				accepted=0
+			else:
+				accepted=1
+			return paxos_pb2.PromiseReply(highest_proposal=accepted_p,highest_value=accepted_val, accepted=accepted)
 
-def broadcast_prepare():
+#returns highest value(what will be writtein to log) if successfully get majority of promises, None otherwise. Repeatedly attempts to do so until view is changed. 
+def broadcast_prepare(value):
 	received=0
-	future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=proposal_num)):i for i in range(n) if i!=uid}
+
+	#highest proposals and values returned on promises
+	hv=None
+	hp=None
+
+	while view%n==uid:
+		future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) if i!=uid}
+		while received<f+1:
+			for future in future_to_uid.keys():
+				if(future.done()):
+					res=future.result()
+
+					#i am no longer leader
+					if res.ignored:
+						return None
+
+					received+=1
+					rid=future_to_uid[future]
+					del future_to_uid[future] 
+					if res.accepted:
+						if res.highest_proposal>=hp:
+							hp=res.highest_proposal
+							hv=res.highest_value
+		if hv==None:
+			hv=value
+		return hv
+	return None
+
+def broadcast_accept():
+	received=0
+	future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) if i!=uid}
 	while received<f+1:
 		for future in future_to_uid.keys():
 			if(future.done()):
-				received+=1
-				print future.result().highest_proposal, future.result().highest_value
+				res=future.result()
+				rid=future_to_uid[future]
 				del future_to_uid[future]
+				if res.ignored:
+					continue
+				received+=1
+				print res.highest_proposal, res.highest_value, res.ignored, rid
+
+
 
 def main():
 	global f
 	global n
 	global uid
-	global proposal_num
 	global channels
 	global stubs
 
@@ -83,7 +129,6 @@ def main():
 	for o, a in opts:
 		if o == "-i":
 			uid=int(a)
-			proposal_num=uid
 		else:
 			assert False, "unhandled option"
 
