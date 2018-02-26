@@ -46,9 +46,10 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 			learned=broadcast_accept(val)
 			if learned!=None:
 				start_time=datetime.now()
-				while (datetime.now()-start_time).total_seconds()<1:
+				while (datetime.now()-start_time).total_seconds()<2:
 					if log==int(request.mesg):
 						return paxos_pb2.ChatReply(mesg='ack: %s'%request.mesg)
+				print log
 				return paxos_pb2.ChatReply(mesg='Learned some other value')
 			else:
 				return paxos_pb2.ChatReply(mesg='Ignored: I am no longer leader!')
@@ -73,10 +74,14 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 
 	def Accept(self, request, context):
 		global view
+		global accepted_val
+		global accepted_p
 		with view_lock:
 			if request.n<view:
 				return paxos_pb2.AcceptReply(view=view)
 			view=max(view, request.n)
+			accepted_val=request.val
+			acceped_p=view
 			print str(uid)+' Accepting leader %d:'%request.n, request.val
 			t=threading.Thread(target=broadcast_learn, args=(request.val,view))
 			t.start()
@@ -86,16 +91,19 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 		global view
 		global learn_requests
 		global log
+		if log!=None:
+			#already learned
+			return paxos_pb2.LearnReply(ack=1)
 		with view_lock:
 			view=max(view, request.n)
-			print "%d has request %d"%(uid,request.rid)
 			if learn_requests[request.rid][0]<=request.n:
+				print "%d has request %d"%(uid,request.rid)
 				learn_requests[request.rid]=(request.n, request.val)
 				c=Counter(learn_requests)
 				maj=c.most_common()[0]
 				if maj[0][1]!=None and maj[1]>f:
 					log=maj[0][1]
-					print "%d is learning %d"%(uid,request.val)
+					print "%d HAS LEARNED %d!!"%(uid,request.val)
 		return paxos_pb2.LearnReply(ack=1)
 
 #returns highest value(what will be written to log) if successfully get majority of promises, None otherwise. Repeatedly attempts to do so until view is changed. 
@@ -155,6 +163,7 @@ def broadcast_accept(value):
 						res=future.result()
 						rid=future_to_uid[future]
 						del future_to_uid[future]
+						#no risk of data race here
 						if res.view>cur_view:
 							view=max(res.view, view)
 							return None
@@ -174,7 +183,8 @@ def broadcast_learn(value, p_num):
 	received=[False]*n
 	recv_num=0
 
-	while True:
+	outer_time=datetime.now()
+	while (datetime.now()-outer_time).total_seconds()<5:
 		view_lock.acquire()
 		#if I return before futures fire off, they just die
 		future_to_uid= {stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid)):i for i in range(n) if received[i]==False}
@@ -189,7 +199,7 @@ def broadcast_learn(value, p_num):
 					if res.ack==1:
 						received[rid]=True
 						recv_num+=1
-					if recv_num>f:
+					if recv_num==n:
 						return 
 	return 
 
