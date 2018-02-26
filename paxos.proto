@@ -13,6 +13,27 @@ service Chatter {
 
 service Paxos {
   rpc Prepare(PrepareSend) returns (PromiseReply){}
+  rpc Accept(AcceptSend) returns (AcceptReply){}
+  rpc Learn(LearnSend) returns (LearnReply){}
+}
+
+message LearnReply{
+  int32 ack=1;
+}
+
+message LearnSend{
+  int32 n=1;
+  int32 val=2;
+  int32 rid=3;
+}
+
+message AcceptSend{
+  int32 n=1;
+  int32 val=2;
+}
+
+message AcceptReply{
+  int32 view=1;
 }
 
 message PrepareSend{
@@ -34,4 +55,8 @@ message ChatRequest {
 
 message ChatReply {
   string mesg = 1;
+}
+
+message Empty {
+
 }
