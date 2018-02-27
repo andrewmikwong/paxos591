@@ -39,10 +39,11 @@ log=[]
 
 _ONE_DAY_IN_SECONDS=60*60*24
 
-def print_state():
-	print 'uid=%d'%uid
-	print 'f=%d'%f
-	print 'n=%d'%n
+def print_log():
+	print 'Replica %d\'s LOG:'%uid
+	for m in log:
+		if m !=None:
+			print m
 
 class Chatter(paxos_pb2_grpc.ChatterServicer):
 	def SendChatMessage(self, request, context):
@@ -70,10 +71,9 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 				start_time=datetime.now()
 				while (datetime.now()-start_time).total_seconds()<2:
 					if log[slot]==int(request.mesg):
-						return paxos_pb2.ChatReply(mesg='ack: %s'%request.mesg)
+						return paxos_pb2.ChatReply(mesg='ack: %s placed in slot %d'%(request.mesg,slot))
 					elif log[slot]!=None:
 						continue
-				print log[slot]
 				return paxos_pb2.ChatReply(mesg='Learned some other value')
 			else:
 				return paxos_pb2.ChatReply(mesg='Ignored: I was not accepted: am no longer leader!')
@@ -102,12 +102,12 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 				return paxos_pb2.AcceptReply(view=view)
 			view=max(view, request.n)
 
-			with accepted_lock()
+			with accepted_lock:
 				diff_len=max(len(accepted),request.slot+1)-min(len(accepted),request.slot+1)
 				for i in range(diff_len):
 					accepted.append(0)
 					accepted_ps.append(None)
-					acceped_vals.append(None)
+					accepted_vals.append(None)
 				accepted_vals[request.slot]=request.val
 				accepted_ps[request.slot]=view
 				accepted[request.slot]=1
@@ -121,6 +121,7 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 		global learn_requests
 		global log
 		with log_lock:
+			#extend log
 			diff_len=max(len(log),request.slot+1)-min(len(log),request.slot+1)
 			for i in range(diff_len):
 				log.append(None)
@@ -132,7 +133,7 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 			
 			diff_len=max(len(learn_requests),request.slot+1)-min(len(learn_requests),request.slot+1)
 			for i in range(diff_len):
-				learn_requests.append([(None,None)*n]
+				learn_requests.append([(None,None)]*n)
 			
 			if learn_requests[request.slot][request.rid][0]<=request.n:
 				print "%d has request %d"%(uid,request.rid)
@@ -140,8 +141,10 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 				c=Counter(learn_requests[request.slot])
 				maj=c.most_common()[0]
 				if maj[0][1]!=None and maj[1]>f:
-					log=maj[0][1]
+					
+					log[request.slot]=maj[0][1]
 					print "%d HAS LEARNED %d!!"%(uid,request.val)
+					print_log()
 		with view_lock:
 			view=max(view, request.n)
 		return paxos_pb2.LearnReply(ack=1)
@@ -170,7 +173,8 @@ def broadcast_prepare():
 					if res.ignored:
 						with leader_lock:
 							i_am_leader=False
-						view=max(view,res.ignored)
+						with view_lock:
+							view=max(view,res.ignored)
 						return False
 
 					received+=1
@@ -222,7 +226,7 @@ def broadcast_accept(value, slot):
 	recv_num=0
 
 	#need a lock here
-	while log==None:
+	while log[slot]==None:
 		print "Broadcasting Accept "+str(uid)
 		view_lock.acquire()
 		cur_view=view
@@ -241,7 +245,8 @@ def broadcast_accept(value, slot):
 						if res.view>cur_view:
 							with leader_lock():
 								i_am_leader=False
-							view=max(res.view, view)
+							with view_lock:
+								view=max(res.view, view)
 							return None
 						received[rid]=True
 						recv_num+=1
