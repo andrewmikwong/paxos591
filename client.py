@@ -33,10 +33,13 @@ def main():
 	stub=paxos_pb2_grpc.ChatterStub(channel)
 	seq=0
 	while(s!='quit'):
-		s=raw_input()
-		response=stub.SendChatMessage.future(paxos_pb2.ChatRequest(mesg=s,seq_num=seq, rid=client))
-		print response.result().mesg	
-		seq+=1
+		try:
+			response=stub.SendChatMessage.future(paxos_pb2.ChatRequest(mesg=s,seq_num=seq, rid=client))
+			print response.result().mesg	
+			s=raw_input()
+			seq+=1
+		except:
+			
 		
 
 if __name__=='__main__':
