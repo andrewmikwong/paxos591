@@ -19,16 +19,23 @@ uid=-1
 f=-1
 n=-1
 
+log_lock=Lock()
 view_lock=Lock()
+leader_lock=Lock()
+accepted_lock=Lock()
 view=0
 p=-1
-accepted_val=None
-accepted_p=None
-learn_requests=None
+i_am_leader=False
+accepted_vals=[]
+accepted_ps=[]
+#bit mask for accepted slots
+accepted=[]
+learn_requests=[]
+tail=-1
 
 channels=[]
 stubs=[]
-log=None
+log=[]
 
 _ONE_DAY_IN_SECONDS=60*60*24
 
@@ -39,51 +46,73 @@ def print_state():
 
 class Chatter(paxos_pb2_grpc.ChatterServicer):
 	def SendChatMessage(self, request, context):
-		if(view%n==uid):
-			val= broadcast_prepare(int(request.mesg))
-			if val==None:
+		global tail
+		global log
+		slot=-1
+		#don't need view lock here
+		while(view%n==uid):
+			with log_lock:
+				tail+=1
+				slot=tail
+				log.append(None)
+			if not i_am_leader:
+				broadcast_prepare()
+			if not i_am_leader:
 				return paxos_pb2.ChatReply(mesg='IGNORED:I AM NO LONGER LEADER')
-			learned=broadcast_accept(val)
-			if learned!=None:
+	
+			val=int(request.mesg)
+			if len(accepted)>slot:
+				if accepted[slot]:
+					val=accepted_vals[slot]
+
+			accepted_as_leader=broadcast_accept(val,slot)
+			if accepted_as_leader!=None:
 				start_time=datetime.now()
 				while (datetime.now()-start_time).total_seconds()<2:
-					if log==int(request.mesg):
+					if log[slot]==int(request.mesg):
 						return paxos_pb2.ChatReply(mesg='ack: %s'%request.mesg)
-				print log
+					elif log[slot]!=None:
+						continue
+				print log[slot]
 				return paxos_pb2.ChatReply(mesg='Learned some other value')
 			else:
-				return paxos_pb2.ChatReply(mesg='Ignored: I am no longer leader!')
-		else:
-			return paxos_pb2.ChatReply(mesg='IGNORED')
+				return paxos_pb2.ChatReply(mesg='Ignored: I was not accepted: am no longer leader!')
+		return paxos_pb2.ChatReply(mesg='IGNORED')
 
 class Paxos(paxos_pb2_grpc.PaxosServicer):
 	def Prepare(self, request, context):
 		global view
 		#should this be a LEQ?? multiple proposals??
-		if request.proposal<view:
-			return paxos_pb2.PromiseReply(ignored=view)
-		else:
-			#NEED A LOCK here!!!!!
-			#all view writes need locks!!
-			view=max(request.proposal,view)
-			if accepted_val==None:
-				accepted=0
+		with view_lock:
+			if request.proposal<view:
+				return paxos_pb2.PromiseReply(ignored=view)
 			else:
-				accepted=1
-			return paxos_pb2.PromiseReply(highest_proposal=accepted_p,highest_value=accepted_val, accepted=accepted)
+				#NEED A LOCK here!!!!!
+				#all view writes need locks!!
+				view=max(request.proposal,view)
+				return paxos_pb2.PromiseReply(highest_proposals=accepted_ps,highest_values=accepted_vals, accepted=accepted)
 
 	def Accept(self, request, context):
 		global view
-		global accepted_val
-		global accepted_p
+		global accepted_vals
+		global accepted_ps
+		global accepted
 		with view_lock:
 			if request.n<view:
 				return paxos_pb2.AcceptReply(view=view)
 			view=max(view, request.n)
-			accepted_val=request.val
-			acceped_p=view
+
+			with accepted_lock()
+				diff_len=max(len(accepted),request.slot+1)-min(len(accepted),request.slot+1)
+				for i in range(diff_len):
+					accepted.append(0)
+					accepted_ps.append(None)
+					acceped_vals.append(None)
+				accepted_vals[request.slot]=request.val
+				accepted_ps[request.slot]=view
+				accepted[request.slot]=1
 			print str(uid)+' Accepting leader %d:'%request.n, request.val
-			t=threading.Thread(target=broadcast_learn, args=(request.val,view))
+			t=threading.Thread(target=broadcast_learn, args=(request.val,view, request.slot))
 			t.start()
 			return paxos_pb2.AcceptReply(view=view)
 
@@ -91,59 +120,104 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 		global view
 		global learn_requests
 		global log
-		if log!=None:
-			#already learned
-			return paxos_pb2.LearnReply(ack=1)
-		with view_lock:
-			view=max(view, request.n)
-			if learn_requests[request.rid][0]<=request.n:
+		with log_lock:
+			diff_len=max(len(log),request.slot+1)-min(len(log),request.slot+1)
+			for i in range(diff_len):
+				log.append(None)
+			if log[request.slot]!=None:
+				#already learned
+				return paxos_pb2.LearnReply(ack=1)
+
+			#extend learn requests
+			
+			diff_len=max(len(learn_requests),request.slot+1)-min(len(learn_requests),request.slot+1)
+			for i in range(diff_len):
+				learn_requests.append([(None,None)*n]
+			
+			if learn_requests[request.slot][request.rid][0]<=request.n:
 				print "%d has request %d"%(uid,request.rid)
-				learn_requests[request.rid]=(request.n, request.val)
-				c=Counter(learn_requests)
+				learn_requests[request.slot][request.rid]=(request.n, request.val)
+				c=Counter(learn_requests[request.slot])
 				maj=c.most_common()[0]
 				if maj[0][1]!=None and maj[1]>f:
 					log=maj[0][1]
 					print "%d HAS LEARNED %d!!"%(uid,request.val)
+		with view_lock:
+			view=max(view, request.n)
 		return paxos_pb2.LearnReply(ack=1)
 
 #returns highest value(what will be written to log) if successfully get majority of promises, None otherwise. Repeatedly attempts to do so until view is changed. 
-# returns the high value
-def broadcast_prepare(value):
+#returns true if i am now leader, false otherwise
+def broadcast_prepare():
 	global view
+	global accepted_ps
+	global accepted_vals
+	global accepted
+	global i_am_leader
 	received=0
 
-	#highest proposals and values returned on promises
-	hv=None
-	hp=None
-
+	view_lock.acquire()
 	while view%n==uid:
 		future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) }
-		while received<f+1:
+		view_lock.release()
+		start_time=datetime.now()
+		while received<f+1 and (datetime.now()-start_time).total_seconds<1:
 			for future in future_to_uid.keys():
 				if(future.done()):
 					res=future.result()
 
 					#i am no longer leader
 					if res.ignored:
+						with leader_lock:
+							i_am_leader=False
 						view=max(view,res.ignored)
-						return None
+						return False
 
 					received+=1
 					rid=future_to_uid[future]
 					del future_to_uid[future] 
-					if res.accepted:
-						if res.highest_proposal>=hp:
-							hp=res.highest_proposal
-							hv=res.highest_value
-		if hv==None:
-			hv=value
-		return hv
-	return None
+
+					accepted_lock.acquire()
+
+					#merge with my own accepts
+					m=min(len(accepted), len(res.accepted))
+					temp_ps=[None]*m
+					temp_vals=[None]*m
+					temp_accepts=[None]*m
+					for i in range(m):
+						temp_accepts[i]=res.accepted[i] or accepted[i]
+						if res.accepted[i]:
+							if res.highest_proposals[i]>=accepted_ps[i]:
+								temp_ps[i]=res.highest_proposals[i]
+								temp_vals[i]=res.highest_values[i]
+							else:
+								temp_ps[i]=accepted_ps[i]
+								temp_vals[i]=accepted_vals[i]
+					if len(accepted)>len(res.accepted):
+						accepted_ps=temp_ps+accepted_ps[m:]
+						accepted_vals=temp_vals+accepted_vals[m:]
+						accepted=temp_accepts+accepted[m:]
+					elif len(res.accepted)>len(accepted):
+						accepted_ps=temp_ps+res.highest_proposals[m:]
+						accepted_vals=temp_vals+res.highest_values[m:]
+						accepted=temp_accepts+res.accepted[m:]
+					else:
+						accepted_ps=temp_ps
+						accepted_vals=temp_vals
+						accepted=temp_accepts
+					accepted_lock.release()
+		with leader_lock:
+			i_am_leader=True
+		return True
+	with leader_lock:
+		i_am_leader=False
+	return False
 
 #now that we have majority, we can just keep broadcasting accept until either we lose leadership or the value is learned.
 #returns None if we lose leadership before learning log value
-def broadcast_accept(value):
+def broadcast_accept(value, slot):
 	global view
+	global i_am_leader
 	received=[False]*n
 	recv_num=0
 
@@ -154,7 +228,7 @@ def broadcast_accept(value):
 		cur_view=view
 		if view%n==uid:
 			#if I return before futures fire off, they just die
-			future_to_uid= {stubs[i].Accept.future(paxos_pb2.AcceptSend(n=view,val=value)):i for i in range(n) if received[i]==False}
+			future_to_uid= {stubs[i].Accept.future(paxos_pb2.AcceptSend(n=view,val=value, slot=slot)):i for i in range(n) if received[i]==False}
 			view_lock.release()
 			start_time=datetime.now()
 			while (datetime.now()-start_time).total_seconds()<1:
@@ -165,6 +239,8 @@ def broadcast_accept(value):
 						del future_to_uid[future]
 						#no risk of data race here
 						if res.view>cur_view:
+							with leader_lock():
+								i_am_leader=False
 							view=max(res.view, view)
 							return None
 						received[rid]=True
@@ -173,12 +249,14 @@ def broadcast_accept(value):
 							return True
 		else:
 			view_lock.release()
+			with leader_lock():
+				i_am_leader=False
 			return None
 	#if we get here the value has been learned or majority has accepted
 	return True
 
 #broadcasts learn requests from proposer p_num for value value
-def broadcast_learn(value, p_num):
+def broadcast_learn(value, p_num, slot):
 	global view
 	received=[False]*n
 	recv_num=0
@@ -187,7 +265,7 @@ def broadcast_learn(value, p_num):
 	while (datetime.now()-outer_time).total_seconds()<5:
 		view_lock.acquire()
 		#if I return before futures fire off, they just die
-		future_to_uid= {stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid)):i for i in range(n) if received[i]==False}
+		future_to_uid= {stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid, slot=slot)):i for i in range(n) if received[i]==False}
 		view_lock.release()
 		start_time=datetime.now()
 		while (datetime.now()-start_time).total_seconds()<1:
@@ -209,7 +287,7 @@ def main():
 	global uid
 	global channels
 	global stubs
-	global learn_requests
+#	global learn_requests
 
 	#read config file
 	fd=open('config.txt',"r")
@@ -242,7 +320,7 @@ def main():
 	time.sleep(1)
 
 	#init learn_requests
-	learn_requests=[(None,None)]*n
+#	learn_requests=[(None,None)]*n
 
 	#initialize grpc channels and stubs with other replicas
 	channels=[None]*n

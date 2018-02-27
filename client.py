@@ -7,13 +7,11 @@ import grpc
 import paxos_pb2
 import paxos_pb2_grpc
 
-f=-1
 
 def main():
 	fd=open("config.txt","r")
 	configs=json.loads(fd.read())
 	fd.close()
-	f=configs['f']
 	s=''
 
 	#get options
@@ -31,10 +29,12 @@ def main():
 
 	channel=grpc.insecure_channel('localhost:'+str(8000+uid))
 	stub=paxos_pb2_grpc.ChatterStub(channel)
+	seq=0
 	while(s!='quit'):
 		s=raw_input()
-		response=stub.SendChatMessage.future(paxos_pb2.ChatRequest(mesg=s))
+		response=stub.SendChatMessage.future(paxos_pb2.ChatRequest(mesg=s,seq_num=seq))
 		print response.result().mesg	
+		seq+=1
 		
 
 if __name__=='__main__':

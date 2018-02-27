@@ -25,11 +25,13 @@ message LearnSend{
   int32 n=1;
   int32 val=2;
   int32 rid=3;
+  int32 slot=4;
 }
 
 message AcceptSend{
   int32 n=1;
   int32 val=2;
+  int32 slot=3;
 }
 
 message AcceptReply{
@@ -41,10 +43,10 @@ message PrepareSend{
 }
 
 message PromiseReply{
-  int32 highest_proposal = 1;
-  int32 highest_value = 2;
+  repeated int32 highest_proposals = 1;
+  repeated int32 highest_values = 2;
   //has the accepter already accepted anything in this slot?
-  int32 accepted=3;
+  repeated int32 accepted=3;
   int32 ignored=4;
 }
 
