@@ -23,14 +23,14 @@ message LearnReply{
 
 message LearnSend{
   int32 n=1;
-  int32 val=2;
+  string val=2;
   int32 rid=3;
   int32 slot=4;
 }
 
 message AcceptSend{
   int32 n=1;
-  int32 val=2;
+  string val=2;
   int32 slot=3;
 }
 
@@ -53,6 +53,7 @@ message PromiseReply{
 message ChatRequest {
   string mesg = 1;
   int32 seq_num = 2;
+  int32 rid = 3;
 }
 
 message ChatReply {

@@ -47,34 +47,43 @@ def print_log():
 
 class Chatter(paxos_pb2_grpc.ChatterServicer):
 	def SendChatMessage(self, request, context):
+		s='Client %d: '%(request.rid)+ request.mesg
 		global tail
 		global log
 		slot=-1
 		#don't need view lock here
+ 
+		with log_lock:
+			tail+=1
+			slot=tail
+			log.append(None)
+
 		while(view%n==uid):
-			with log_lock:
-				tail+=1
-				slot=tail
-				log.append(None)
 			if not i_am_leader:
 				broadcast_prepare()
 			if not i_am_leader:
 				return paxos_pb2.ChatReply(mesg='IGNORED:I AM NO LONGER LEADER')
 	
-			val=int(request.mesg)
-			if len(accepted)>slot:
-				if accepted[slot]:
-					val=accepted_vals[slot]
+			val=s
+			with accepted_lock:
+				if len(accepted)>slot:
+					if accepted[slot]:
+						val=accepted_vals[slot]
 
 			accepted_as_leader=broadcast_accept(val,slot)
 			if accepted_as_leader!=None:
 				start_time=datetime.now()
 				while (datetime.now()-start_time).total_seconds()<2:
-					if log[slot]==int(request.mesg):
-						return paxos_pb2.ChatReply(mesg='ack: %s placed in slot %d'%(request.mesg,slot))
-					elif log[slot]!=None:
-						continue
-				return paxos_pb2.ChatReply(mesg='Learned some other value')
+					with log_lock:
+						if log[slot]==s:
+							return paxos_pb2.ChatReply(mesg='ack: %s placed in slot %d'%(request.mesg,slot))
+						elif log[slot]!=None:
+							#some other value is in this slot, try next one
+							tail+=1
+							slot=tail
+							log.append(None)
+							break
+				print "Trying again same slot!!"
 			else:
 				return paxos_pb2.ChatReply(mesg='Ignored: I was not accepted: am no longer leader!')
 		return paxos_pb2.ChatReply(mesg='IGNORED')
@@ -143,7 +152,7 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 				if maj[0][1]!=None and maj[1]>f:
 					
 					log[request.slot]=maj[0][1]
-					print "%d HAS LEARNED %d!!"%(uid,request.val)
+					print "%d HAS LEARNED %s!!"%(uid,request.val)
 					print_log()
 		with view_lock:
 			view=max(view, request.n)
