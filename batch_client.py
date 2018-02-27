@@ -65,7 +65,9 @@ def main():
                 print str(err)  # will print something like "option -a not recognized"
                 sys.exit(2)
         for o, a in opts:
-		if o =="-c":
+                if o == "-i":
+                        uid=int(a)
+		elif o =="-c":
 			client=int(a)
                 else:
                         assert False, "unhandled option"
@@ -75,37 +77,25 @@ def main():
         channels=[None]*n
         stubs=[None]*n
         for i in range(n):
-                channels[i]=grpc.insecure_channel('0.0.0.0:'+str(8000+i))
+                channels[i]=grpc.insecure_channel('localhost:'+str(8000+i))
                 stubs[i]=paxos_pb2_grpc.ChatterStub(channels[i])
 
+#        channel=grpc.insecure_channel('localhost:'+str(8000+uid))
 #	stub=paxos_pb2_grpc.ChatterStub(channel)
 	seq=0
-	s=raw_input()
+	s='0'
 	while(True):
-		if s=='quit':
-			break
-		elif s=='query':
-			query_replicas()
-			print 'view=%d'%(view)
-			print 'HASHES:'
-			print hashes
-			print 'VIEWS:'
-			print views
-			s=raw_input()
-			continue
 		try:
 			response=stubs[view%n].SendChatMessage.future(paxos_pb2.ChatRequest(mesg=s,seq_num=seq, rid=client))
 			start_time=datetime.now()
 			while (datetime.now()-start_time).total_seconds()<3:
 				if response.done():
 					try:
-						print response.result().mesg	
 						if response.result().success:
 							seq+=1
-							s=raw_input()
+							s=str(seq)
 							break
 						query_replicas()
-						print "changing view to %d"%(view)
 						break
 					except:
 						query_replicas()
@@ -113,7 +103,6 @@ def main():
 			
 		except:
 			query_replicas()
-			print "VIEW CHANGE! %d"%(view)
 		
 
 if __name__=='__main__':

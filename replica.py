@@ -23,6 +23,7 @@ log_lock=Lock()
 view_lock=Lock()
 leader_lock=Lock()
 accepted_lock=Lock()
+learn_lock=Lock()
 view=0
 lead=1
 p=-1
@@ -45,11 +46,13 @@ def heart_beat(rep):
 	try:
 		fut=stubs[rep%n].HeartBeat.future(paxos_pb2.Empty())
 		start_time=datetime.now()
-		while (datetime.now()-start_time).total_seconds()<1:
+		while (datetime.now()-start_time).total_seconds()<0.5:
 			if fut.done():
-				return True
-		if fut.result().ack==1:
-			return True
+				try:
+					if fut.result().ack==1:
+						return True
+				except:
+					break
 	except:
 		return False
 	return False
@@ -58,13 +61,15 @@ def view_switch():
 	global view
 	global lead
 	with view_lock:
-		if uid==((view+lead)%n):
+		#if uid==((view+lead)%n):
+		while view%n!=uid:
 			view+=1
-			lead=1
-			print "%d is LEADER!"%(uid)
-			broadcast_prepare()
-		else:
-			lead+=1
+		lead=1
+		print "%d is LEADER!"%(uid)
+
+	broadcast_prepare()
+		#else:
+		#	lead+=1
 
 def print_log():
 	print 'Replica %d\'s LOG:'%uid
@@ -81,15 +86,16 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 		#don't need view lock here
  
 		with log_lock:
-			tail+=1
+			tail=len(log)
 			slot=tail
 			log.append(None)
+		print '%d is handling:'%(uid) +s
 
 		while(view%n==uid):
 			if not i_am_leader:
 				broadcast_prepare()
 			if not i_am_leader:
-				return paxos_pb2.ChatReply(mesg='IGNORED:I AM NO LONGER LEADER')
+				return paxos_pb2.ChatReply(mesg='IGNORED:I AM NO LONGER LEADER', success=0)
 	
 			val=s
 			with accepted_lock:
@@ -103,32 +109,37 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 				while (datetime.now()-start_time).total_seconds()<2:
 					with log_lock:
 						if log[slot]==s:
-							return paxos_pb2.ChatReply(mesg='ack: %s placed in slot %d'%(request.mesg,slot))
+							return paxos_pb2.ChatReply(mesg='ack: %s placed in slot %d'%(request.mesg,slot), success=1)
 						elif log[slot]!=None:
 							#some other value is in this slot, try next one
-							tail+=1
+							tail=len(log)
 							slot=tail
 							log.append(None)
 							break
 				print "Trying again same slot!!"
 			else:
-				return paxos_pb2.ChatReply(mesg='Ignored: I was not accepted: am no longer leader!')
-		return paxos_pb2.ChatReply(mesg='IGNORED')
+				return paxos_pb2.ChatReply(mesg='Ignored: I was not accepted: am no longer leader!', success=0)
+		return paxos_pb2.ChatReply(mesg='IGNORED', success=0)
+
+	def GetData(self, request, context):
+		h=hash(str(log))%(2**30)
+		return paxos_pb2.DataReply(view=view,hash=h)
 
 class Paxos(paxos_pb2_grpc.PaxosServicer):
 	def Prepare(self, request, context):
 		global lead
 		global view
 		#should this be a LEQ?? multiple proposals??
-		with view_lock:
+		with view_lock and accepted_lock:
 			if request.proposal<view:
-				return paxos_pb2.PromiseReply(ignored=view)
+				return paxos_pb2.PromiseReply(ignored=1,view=view)
 			else:
 				#NEED A LOCK here!!!!!
 				#all view writes need locks!!
 				lead=1
 				view=max(request.proposal,view)
-				return paxos_pb2.PromiseReply(highest_proposals=accepted_ps,highest_values=accepted_vals, accepted=accepted)
+				print "%d: %d is my leader!"%(uid, view)
+				return paxos_pb2.PromiseReply(highest_proposals=accepted_ps,highest_values=accepted_vals, accepted=accepted,ignored=0)
 
 	def Accept(self, request, context):
 		global view
@@ -146,8 +157,8 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 				diff_len=max(len(accepted),request.slot+1)-min(len(accepted),request.slot+1)
 				for i in range(diff_len):
 					accepted.append(0)
-					accepted_ps.append(None)
-					accepted_vals.append(None)
+					accepted_ps.append(0)
+					accepted_vals.append("")
 				accepted_vals[request.slot]=request.val
 				accepted_ps[request.slot]=view
 				accepted[request.slot]=1
@@ -170,21 +181,21 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 				return paxos_pb2.LearnReply(ack=1)
 
 			#extend learn requests
-			
-			diff_len=max(len(learn_requests),request.slot+1)-min(len(learn_requests),request.slot+1)
-			for i in range(diff_len):
-				learn_requests.append([(None,None)]*n)
-			
-			if learn_requests[request.slot][request.rid][0]<=request.n:
-				print "%d has request %d"%(uid,request.rid)
-				learn_requests[request.slot][request.rid]=(request.n, request.val)
-				c=Counter(learn_requests[request.slot])
-				maj=c.most_common()[0]
-				if maj[0][1]!=None and maj[1]>f:
-					
-					log[request.slot]=maj[0][1]
-					print "%d HAS LEARNED %s!!"%(uid,request.val)
-					print_log()
+			with learn_lock:
+				diff_len=max(len(learn_requests),request.slot+1)-min(len(learn_requests),request.slot+1)
+				for i in range(diff_len):
+					learn_requests.append([(None,None)]*n)
+				
+				if learn_requests[request.slot][request.rid][0]<request.n:
+					print "%d has request %d"%(uid,request.rid)
+					learn_requests[request.slot][request.rid]=(request.n, request.val)
+					c=Counter(learn_requests[request.slot])
+					maj=c.most_common()[0]
+					if maj[0][1]!=None and maj[1]>f:
+						
+						log[request.slot]=maj[0][1]
+						print "%d HAS LEARNED %s!!"%(uid,request.val)
+						#print_log()
 		with view_lock:
 			view=max(view, request.n)
 		return paxos_pb2.LearnReply(ack=1)
@@ -200,37 +211,55 @@ def broadcast_prepare():
 	global accepted_vals
 	global accepted
 	global i_am_leader
-	received=0
+	received=[False]*n
+	recv_num=0
 
-	view_lock.acquire()
-	while view%n==uid:
-		future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) }
+	while True:
+		view_lock.acquire()
+		if view%n!=uid:
+			break
+
+		future_to_uid={}
+                for i in range(n):
+			if received[i]==False:
+				try:
+					future_to_uid[stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view))]=i
+				except:
+					pass
+
+		#no chance of getting quorum
+		if len(future_to_uid)<f+1:
+			continue
+	#	future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) }
 		view_lock.release()
 		start_time=datetime.now()
-		while received<f+1 and (datetime.now()-start_time).total_seconds()<1:
+		while recv_num<f+1 and (datetime.now()-start_time).total_seconds()<1:
 			for future in future_to_uid.keys():
 				if(future.done()):
-					res=future.result()
-
-					#i am no longer leader
-					if res.ignored:
-						with leader_lock:
-							i_am_leader=False
-						with view_lock:
-							view=max(view,res.ignored)
-						return False
-
-					received+=1
 					rid=future_to_uid[future]
 					del future_to_uid[future] 
+					try:
+						res=future.result()
+
+					#i am no longer leader
+						if res.ignored:
+							with leader_lock:
+								i_am_leader=False
+							with view_lock:
+								view=max(view,res.view)
+							return False
+						received[i]=True
+						recv_num+=1
+					except:
+						continue
 
 					accepted_lock.acquire()
 
 					#merge with my own accepts
 					m=min(len(accepted), len(res.accepted))
-					temp_ps=[None]*m
-					temp_vals=[None]*m
-					temp_accepts=[None]*m
+					temp_ps=[0]*m
+					temp_vals=[""]*m
+					temp_accepts=[0]*m
 					for i in range(m):
 						temp_accepts[i]=res.accepted[i] or accepted[i]
 						if res.accepted[i]:
@@ -253,9 +282,12 @@ def broadcast_prepare():
 						accepted_vals=temp_vals
 						accepted=temp_accepts
 					accepted_lock.release()
-		with leader_lock:
-			i_am_leader=True
-		return True
+		if recv_num>f:
+			with leader_lock:
+				i_am_leader=True
+			return True
+		else:
+			 continue
 	with leader_lock:
 		i_am_leader=False
 	return False
@@ -275,29 +307,41 @@ def broadcast_accept(value, slot):
 		cur_view=view
 		if view%n==uid:
 			#if I return before futures fire off, they just die
-			future_to_uid= {stubs[i].Accept.future(paxos_pb2.AcceptSend(n=view,val=value, slot=slot)):i for i in range(n) if received[i]==False}
+			future_to_uid={}
+                	for i in range(n):
+				if received[i]==False:
+					try:
+						future_to_uid[stubs[i].Accept.future(paxos_pb2.AcceptSend(n=view,val=value,slot=slot))]=i
+					except:
+						pass
+
+			#future_to_uid= {stubs[i].Accept.future(paxos_pb2.AcceptSend(n=view,val=value, slot=slot)):i for i in range(n) if received[i]==False}
 			view_lock.release()
 			start_time=datetime.now()
 			while (datetime.now()-start_time).total_seconds()<1:
 				for future in future_to_uid.keys():
 					if(future.done()):
-						res=future.result()
+						try:
+							res=future.result()
+							recv_num+=1
+							#no risk of data race here
+							if res.view>cur_view:
+								with leader_lock:
+									i_am_leader=False
+								with view_lock:
+									view=max(res.view, view)
+								return None
+						except:
+							pass
+
 						rid=future_to_uid[future]
 						del future_to_uid[future]
-						#no risk of data race here
-						if res.view>cur_view:
-							with leader_lock():
-								i_am_leader=False
-							with view_lock:
-								view=max(res.view, view)
-							return None
 						received[rid]=True
-						recv_num+=1
 						if recv_num==f+1:
 							return True
 		else:
 			view_lock.release()
-			with leader_lock():
+			with leader_lock:
 				i_am_leader=False
 			return None
 	#if we get here the value has been learned or majority has accepted
@@ -313,18 +357,29 @@ def broadcast_learn(value, p_num, slot):
 	while (datetime.now()-outer_time).total_seconds()<5:
 		view_lock.acquire()
 		#if I return before futures fire off, they just die
-		future_to_uid= {stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid, slot=slot)):i for i in range(n) if received[i]==False}
+
+		future_to_uid={}
+		for i in range(n):
+			if received[i]==False:
+				try:
+					future_to_uid[stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid, slot=slot))]=i
+				except:
+					pass
+#		future_to_uid= {stubs[i].Learn.future(paxos_pb2.LearnSend(n=p_num,val=value, rid=uid, slot=slot)):i for i in range(n) if received[i]==False}
 		view_lock.release()
 		start_time=datetime.now()
 		while (datetime.now()-start_time).total_seconds()<1:
 			for future in future_to_uid.keys():
 				if(future.done()):
-					res=future.result()
-					rid=future_to_uid[future]
+					try:
+						res=future.result()
+						rid=future_to_uid[future]
+						if res.ack==1:
+							received[rid]=True
+							recv_num+=1
+					except:
+						pass
 					del future_to_uid[future]
-					if res.ack==1:
-						received[rid]=True
-						recv_num+=1
 					if recv_num==n:
 						return 
 	return 
@@ -361,7 +416,7 @@ def main():
 	server=grpc.server(futures.ThreadPoolExecutor(max_workers=60))
 	paxos_pb2_grpc.add_ChatterServicer_to_server(Chatter(), server)
 	paxos_pb2_grpc.add_PaxosServicer_to_server(Paxos(), server)
-	server.add_insecure_port('localhost:'+str(8000+uid))
+	server.add_insecure_port('0.0.0.0:'+str(8000+uid))
 	server.start()
 
 	#let other replicas start up
@@ -374,7 +429,7 @@ def main():
 	channels=[None]*n
 	stubs=[None]*n
 	for i in range(n):
-		channels[i]=grpc.insecure_channel('localhost:'+str(8000+i))
+		channels[i]=grpc.insecure_channel('0.0.0.0:'+str(8000+i))
 		stubs[i]=paxos_pb2_grpc.PaxosStub(channels[i])
 
 	global lead
@@ -383,10 +438,11 @@ def main():
 		try:
 			leader_alive=False
 			for i in range(5):
-				time.sleep(1)
-				life=heart_beat(view+lead-1)
+				life=heart_beat(view)#+lead-1)
 				if life:
 					leader_alive=True
+				else:
+					print "%d thinks "%(view)+str(view)+": dead: "+str(i)
 			if not leader_alive:
 				view_switch()
 		except KeyboardInterrupt:

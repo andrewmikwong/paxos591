@@ -8,7 +8,9 @@ package paxos;
 
 // Interface exported by the server.
 service Chatter {
-  rpc SendChatMessage (ChatRequest) returns(ChatReply) {}
+  rpc SendChatMessage (ChatRequest) returns (ChatReply) {}
+  //sends back views and log hashes
+  rpc GetData(Empty) returns (DataReply){}
 }
 
 service Paxos {
@@ -16,6 +18,11 @@ service Paxos {
   rpc Accept(AcceptSend) returns (AcceptReply){}
   rpc Learn(LearnSend) returns (LearnReply){}
   rpc HeartBeat(Empty) returns (HBReply){}
+}
+
+message DataReply{
+  int32 view=1;
+  int32 hash=2;
 }
 
 message HBReply{
@@ -49,10 +56,11 @@ message PrepareSend{
 
 message PromiseReply{
   repeated int32 highest_proposals = 1;
-  repeated int32 highest_values = 2;
+  repeated string highest_values = 2;
   //has the accepter already accepted anything in this slot?
   repeated int32 accepted=3;
   int32 ignored=4;
+  int32 view =5;
 }
 
 message ChatRequest {
@@ -63,6 +71,7 @@ message ChatRequest {
 
 message ChatReply {
   string mesg = 1;
+  int32 success = 2;
 }
 
 message Empty {
