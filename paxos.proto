@@ -15,6 +15,11 @@ service Paxos {
   rpc Prepare(PrepareSend) returns (PromiseReply){}
   rpc Accept(AcceptSend) returns (AcceptReply){}
   rpc Learn(LearnSend) returns (LearnReply){}
+  rpc HeartBeat(Empty) returns (HBReply){}
+}
+
+message HBReply{
+  int32 ack=1;
 }
 
 message LearnReply{

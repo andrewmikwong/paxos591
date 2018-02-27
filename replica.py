@@ -24,6 +24,7 @@ view_lock=Lock()
 leader_lock=Lock()
 accepted_lock=Lock()
 view=0
+lead=1
 p=-1
 i_am_leader=False
 accepted_vals=[]
@@ -38,6 +39,32 @@ stubs=[]
 log=[]
 
 _ONE_DAY_IN_SECONDS=60*60*24
+
+#returns true if primary is alive
+def heart_beat(rep):
+	try:
+		fut=stubs[rep%n].HeartBeat.future(paxos_pb2.Empty())
+		start_time=datetime.now()
+		while (datetime.now()-start_time).total_seconds()<1:
+			if fut.done():
+				return True
+		if fut.result().ack==1:
+			return True
+	except:
+		return False
+	return False
+
+def view_switch():
+	global view
+	global lead
+	with view_lock:
+		if uid==((view+lead)%n):
+			view+=1
+			lead=1
+			print "%d is LEADER!"%(uid)
+			broadcast_prepare()
+		else:
+			lead+=1
 
 def print_log():
 	print 'Replica %d\'s LOG:'%uid
@@ -90,6 +117,7 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 
 class Paxos(paxos_pb2_grpc.PaxosServicer):
 	def Prepare(self, request, context):
+		global lead
 		global view
 		#should this be a LEQ?? multiple proposals??
 		with view_lock:
@@ -98,6 +126,7 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 			else:
 				#NEED A LOCK here!!!!!
 				#all view writes need locks!!
+				lead=1
 				view=max(request.proposal,view)
 				return paxos_pb2.PromiseReply(highest_proposals=accepted_ps,highest_values=accepted_vals, accepted=accepted)
 
@@ -106,6 +135,8 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 		global accepted_vals
 		global accepted_ps
 		global accepted
+		global lead
+		lead=1
 		with view_lock:
 			if request.n<view:
 				return paxos_pb2.AcceptReply(view=view)
@@ -157,6 +188,9 @@ class Paxos(paxos_pb2_grpc.PaxosServicer):
 		with view_lock:
 			view=max(view, request.n)
 		return paxos_pb2.LearnReply(ack=1)
+		
+	def HeartBeat(self, request, context):
+		return paxos_pb2.HBReply(ack=1)
 
 #returns highest value(what will be written to log) if successfully get majority of promises, None otherwise. Repeatedly attempts to do so until view is changed. 
 #returns true if i am now leader, false otherwise
@@ -173,7 +207,7 @@ def broadcast_prepare():
 		future_to_uid= {stubs[i].Prepare.future(paxos_pb2.PrepareSend(proposal=view)):i for i in range(n) }
 		view_lock.release()
 		start_time=datetime.now()
-		while received<f+1 and (datetime.now()-start_time).total_seconds<1:
+		while received<f+1 and (datetime.now()-start_time).total_seconds()<1:
 			for future in future_to_uid.keys():
 				if(future.done()):
 					res=future.result()
@@ -324,7 +358,7 @@ def main():
 			assert False, "unhandled option"
 
 	#start grpc server
-	server=grpc.server(futures.ThreadPoolExecutor(max_workers=40))
+	server=grpc.server(futures.ThreadPoolExecutor(max_workers=60))
 	paxos_pb2_grpc.add_ChatterServicer_to_server(Chatter(), server)
 	paxos_pb2_grpc.add_PaxosServicer_to_server(Paxos(), server)
 	server.add_insecure_port('localhost:'+str(8000+uid))
@@ -343,11 +377,20 @@ def main():
 		channels[i]=grpc.insecure_channel('localhost:'+str(8000+i))
 		stubs[i]=paxos_pb2_grpc.PaxosStub(channels[i])
 
-	try:
-		while True:
-			time.sleep(_ONE_DAY_IN_SECONDS)
-	except KeyboardInterrupt:
-		server.stop(0)
+	global lead
+	#heartbeats
+	while True:
+		try:
+			leader_alive=False
+			for i in range(5):
+				time.sleep(1)
+				life=heart_beat(view+lead-1)
+				if life:
+					leader_alive=True
+			if not leader_alive:
+				view_switch()
+		except KeyboardInterrupt:
+			server.stop(0)
 
 
 if __name__=='__main__':
