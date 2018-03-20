@@ -34,6 +34,7 @@ accepted_ps=[]
 accepted=[]
 learn_requests=[]
 tail=-1
+skip=None
 
 channels=[]
 stubs=[]
@@ -87,6 +88,8 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
  
 		with log_lock:
 			tail=len(log)
+			if tail ==skip:
+				tail=tail+1
 			slot=tail
 			log.append(None)
 		print '%d is handling:'%(uid) +s
@@ -113,6 +116,8 @@ class Chatter(paxos_pb2_grpc.ChatterServicer):
 						elif log[slot]!=None:
 							#some other value is in this slot, try next one
 							tail=len(log)
+							if skip==tail:
+								tail=tail+1
 							slot=tail
 							log.append(None)
 							break
@@ -402,18 +407,20 @@ def main():
 	#get options
 	#i=uid
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "i:")
+		opts, args = getopt.getopt(sys.argv[1:], "i:s:")
 	except getopt.GetoptError as err:
 		print str(err)  # will print something like "option -a not recognized"
 		sys.exit(2)
 	for o, a in opts:
 		if o == "-i":
 			uid=int(a)
+		elif o == "-s":
+			skip=int(a)
 		else:
 			assert False, "unhandled option"
 
 	#start grpc server
-	server=grpc.server(futures.ThreadPoolExecutor(max_workers=60))
+	server=grpc.server(futures.ThreadPoolExecutor(max_workers=6000))
 	paxos_pb2_grpc.add_ChatterServicer_to_server(Chatter(), server)
 	paxos_pb2_grpc.add_PaxosServicer_to_server(Paxos(), server)
 	server.add_insecure_port('0.0.0.0:'+str(8000+uid))
